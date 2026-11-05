@@ -98,26 +98,106 @@ def oauth_userinfo():
 TOOLS = {
     "get_ledger": {
         "description": "Get ledger accounts from Miracle accounting software",
-        "inputSchema": {"type": "object", "properties": {
-            "search": {"type": "string", "description": "Search by name"},
-            "limit": {"type": "integer", "default": 50}
-        }}
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "search": {"type": "string", "description": "Search by name"},
+                "limit": {"type": "integer", "default": 50}
+            }
+        }
     },
     "get_vouchers": {
         "description": "Get vouchers/transactions from Miracle accounting software",
-        "inputSchema": {"type": "object", "properties": {
-            "date": {"type": "string", "description": "Filter by date"},
-            "limit": {"type": "integer", "default": 100}
-        }}
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "date": {"type": "string", "description": "Filter by date"},
+                "limit": {"type": "integer", "default": 100}
+            }
+        }
     },
     "get_cashbook": {
         "description": "Get cashbook entries from Miracle accounting software",
-        "inputSchema": {"type": "object", "properties": {
-            "limit": {"type": "integer", "default": 100}
-        }}
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 100}
+            }
+        }
     },
     "get_parties": {
         "description": "Get party/customer list from Miracle accounting software",
-        "inputSchema": {"type": "object", "properties": {
-            "search": {"type": "string", "description": "Search by name"},
-            "limit":
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "search": {"type": "string", "description": "Search by name"},
+                "limit": {"type": "integer", "default": 50}
+            }
+        }
+    },
+}
+
+def call_tool(name, args):
+    def search_filter(records, search_key, search_val, limit):
+        if not search_val:
+            return records[:limit]
+        return [r for r in records if search_val.lower() in str(r.get(search_key, "")).lower()][:limit]
+
+    if name == "get_ledger":
+        data = search_filter(_cache["ledger"], "NAME", args.get("search", ""), args.get("limit", 50))
+        return json.dumps(data, ensure_ascii=False)
+    elif name == "get_vouchers":
+        data = search_filter(_cache["vouchers"], "DATE", args.get("date", ""), args.get("limit", 100))
+        return json.dumps(data, ensure_ascii=False)
+    elif name == "get_cashbook":
+        return json.dumps(_cache["cashbook"][:args.get("limit", 100)], ensure_ascii=False)
+    elif name == "get_parties":
+        data = search_filter(_cache["parties"], "NAME", args.get("search", ""), args.get("limit", 50))
+        return json.dumps(data, ensure_ascii=False)
+    return "Unknown tool"
+
+@app.route("/mcp", methods=["GET", "POST", "DELETE"])
+def mcp_endpoint():
+    if request.method == "GET":
+        accept = request.headers.get("Accept", "")
+        if "text/event-stream" in accept:
+            def sse():
+                import time
+                endpoint_event = json.dumps({"type": "endpoint", "uri": get_base_url() + "/mcp"})
+                yield f"event: endpoint\ndata: {endpoint_event}\n\n"
+                while True:
+                    yield f": keepalive\n\n"
+                    time.sleep(15)
+            return Response(sse(), mimetype="text/event-stream",
+                          headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        return jsonify({
+            "name": "Miracle Connector",
+            "version": "1.0",
+            "protocolVersion": "2024-11-05"
+        })
+
+    body = request.get_json(force=True, silent=True) or {}
+    method = body.get("method", "")
+    req_id = body.get("id")
+
+    if method == "initialize":
+        return jsonify({"jsonrpc": "2.0", "id": req_id, "result": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "Miracle Connector", "version": "1.0"}
+        }})
+    elif method == "notifications/initialized":
+        return jsonify({"jsonrpc": "2.0", "id": req_id, "result": {}})
+    elif method == "tools/list":
+        tools_list = [{"name": k, "description": v["description"], "inputSchema": v["inputSchema"]} for k, v in TOOLS.items()]
+        return jsonify({"jsonrpc": "2.0", "id": req_id, "result": {"tools": tools_list}})
+    elif method == "tools/call":
+        params = body.get("params", {})
+        result = call_tool(params.get("name", ""), params.get("arguments", {}))
+        return jsonify({"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": result}]}})
+    else:
+        return jsonify({"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": "Method not found"}})
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
