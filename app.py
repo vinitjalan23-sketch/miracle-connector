@@ -64,11 +64,13 @@ def oauth_meta():
 
 @app.route("/register", methods=["POST", "GET"])
 def register():
+    data = request.get_json(force=True, silent=True) or {}
+    redirect_uris = data.get("redirect_uris", [])
     return jsonify({
         "client_id": "miracle_client_id",
         "client_secret": "miracle_client_secret",
-        "client_name": "Miracle Connector",
-        "redirect_uris": [],
+        "client_name": data.get("client_name", "Miracle Connector"),
+        "redirect_uris": redirect_uris,
         "grant_types": ["authorization_code"],
         "response_types": ["code"],
         "token_endpoint_auth_method": "client_secret_post",
@@ -118,58 +120,4 @@ TOOLS = {
         "description": "Get party/customer list from Miracle accounting software",
         "inputSchema": {"type": "object", "properties": {
             "search": {"type": "string", "description": "Search by name"},
-            "limit": {"type": "integer", "default": 50}
-        }}
-    },
-}
-
-def call_tool(name, args):
-    def search_filter(records, search_key, search_val, limit):
-        if not search_val:
-            return records[:limit]
-        return [r for r in records if search_val.lower() in str(r.get(search_key, "")).lower()][:limit]
-
-    if name == "get_ledger":
-        data = search_filter(_cache["ledger"], "NAME", args.get("search", ""), args.get("limit", 50))
-        return json.dumps(data, ensure_ascii=False)
-    elif name == "get_vouchers":
-        data = search_filter(_cache["vouchers"], "DATE", args.get("date", ""), args.get("limit", 100))
-        return json.dumps(data, ensure_ascii=False)
-    elif name == "get_cashbook":
-        return json.dumps(_cache["cashbook"][:args.get("limit", 100)], ensure_ascii=False)
-    elif name == "get_parties":
-        data = search_filter(_cache["parties"], "NAME", args.get("search", ""), args.get("limit", 50))
-        return json.dumps(data, ensure_ascii=False)
-    return "Unknown tool"
-
-@app.route("/mcp", methods=["GET", "POST"])
-def mcp_endpoint():
-    if request.method == "GET":
-        def sse():
-            init = {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}
-            yield f"data: {json.dumps(init)}\n\n"
-        return Response(sse(), mimetype="text/event-stream")
-
-    body = request.get_json(force=True, silent=True) or {}
-    method = body.get("method", "")
-    req_id = body.get("id")
-
-    if method == "initialize":
-        return jsonify({"jsonrpc": "2.0", "id": req_id, "result": {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {"tools": {}},
-            "serverInfo": {"name": "Miracle Connector", "version": "1.0"}
-        }})
-    elif method == "tools/list":
-        tools_list = [{"name": k, "description": v["description"], "inputSchema": v["inputSchema"]} for k, v in TOOLS.items()]
-        return jsonify({"jsonrpc": "2.0", "id": req_id, "result": {"tools": tools_list}})
-    elif method == "tools/call":
-        params = body.get("params", {})
-        result = call_tool(params.get("name", ""), params.get("arguments", {}))
-        return jsonify({"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": result}]}})
-    else:
-        return jsonify({"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": "Method not found"}})
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+            "limit":
