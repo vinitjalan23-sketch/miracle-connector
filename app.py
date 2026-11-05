@@ -159,17 +159,6 @@ def call_tool(name, args):
 @app.route("/mcp", methods=["GET", "POST", "DELETE"])
 def mcp_endpoint():
     if request.method == "GET":
-        accept = request.headers.get("Accept", "")
-        if "text/event-stream" in accept:
-            def sse():
-                import time
-                endpoint_event = json.dumps({"type": "endpoint", "uri": get_base_url() + "/mcp"})
-                yield f"event: endpoint\ndata: {endpoint_event}\n\n"
-                while True:
-                    yield f": keepalive\n\n"
-                    time.sleep(15)
-            return Response(sse(), mimetype="text/event-stream",
-                          headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
         return jsonify({
             "name": "Miracle Connector",
             "version": "1.0",
