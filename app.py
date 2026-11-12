@@ -9,6 +9,13 @@ Environment variables (set on Render, never in the repo):
   MIRACLE_PASSWORD  password asked once when connecting the connector in Claude
   SIGN_SECRET       any long random text (used to sign tokens)
 """
+# gevent must patch BEFORE ssl/requests are imported, else "maximum recursion depth exceeded" on https calls
+try:
+    from gevent import monkey
+    monkey.patch_all()
+except Exception:
+    pass
+
 import base64, hashlib, hmac, json, os, time
 from datetime import date
 from html import escape
