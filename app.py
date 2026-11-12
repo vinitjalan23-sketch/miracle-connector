@@ -291,6 +291,100 @@ def t_vouchers(a):
          "narration": r["narration"]} for r in rows]}
 
 
+def _names(table, cno, codes):
+    codes = sorted({c for c in codes if c})
+    if not codes: return {}
+    return {x["code"]: x["name"] for x in sb_get(table, {"select": "code,name", "company_no": "eq." + cno,
+                                                         "code": "in.(" + ",".join(codes) + ")"})}
+
+
+def _party_codes(cno, q):
+    return [x["code"] for x in resolve_ledger(cno, q)]
+
+
+def _item_codes(cno, q):
+    q = clean_q(q)
+    return [x["code"] for x in sb_get("miracle_item_latest", {"select": "code,name", "company_no": "eq." + cno,
+                                                              "or": f"(code.eq.{q},name.ilike.*{q}*)"}, limit=200)]
+
+
+def t_imei(a):
+    comp, err = resolve_company(a.get("company"))
+    if err: return err
+    cno = comp["company_no"]
+    p = {"select": "imei,serial2,item_code,pur_voucher,pur_date,pur_party,pur_rate,sale_voucher,sale_date,sale_vno,sale_party,sale_rate,sold,year_no",
+         "company_no": "eq." + cno, "order": "pur_date.desc"}
+    src = "miracle_imei"
+    if a.get("imei"): p["imei"] = "ilike.*" + clean_q(a["imei"]) + "*"
+    else: src = "miracle_imei_latest"        # list mode: one row per phone
+    if a.get("status") == "sold": p["sold"] = "eq.true"
+    if a.get("status") == "instock": p["sold"] = "eq.false"
+    if a.get("item"):
+        codes = _item_codes(cno, a["item"])
+        if not codes: return {"message": "no item matches", "company": comp["name"]}
+        p["item_code"] = "in.(" + ",".join(codes) + ")"
+    if a.get("sold_to"):
+        codes = _party_codes(cno, a["sold_to"])
+        if not codes: return {"message": "no party matches", "company": comp["name"]}
+        p["sale_party"] = "in.(" + ",".join(codes) + ")"
+    if a.get("bought_from"):
+        codes = _party_codes(cno, a["bought_from"])
+        if not codes: return {"message": "no party matches", "company": comp["name"]}
+        p["pur_party"] = "in.(" + ",".join(codes) + ")"
+    conds = []
+    if a.get("from_date"): conds.append("sale_date.gte." + a["from_date"])
+    if a.get("to_date"): conds.append("sale_date.lte." + a["to_date"])
+    if conds: p["and"] = "(" + ",".join(conds) + ")"
+    rows = sb_get(src, p, limit=int(a.get("limit", 50)))
+    items = _names("miracle_item_latest", cno, [r["item_code"] for r in rows])
+    parties = _names("miracle_ledger_latest", cno, [r["pur_party"] for r in rows] + [r["sale_party"] for r in rows])
+    return {"company": comp["name"], "count": len(rows), "phones": [
+        {"imei": r["imei"], "serial2": r["serial2"], "item": items.get(r["item_code"], r["item_code"]),
+         "bought_on": r["pur_date"], "bought_from": parties.get(r["pur_party"], r["pur_party"]), "cost": money(r["pur_rate"] or 0),
+         "status": "sold" if r["sold"] else "in stock",
+         "sold_on": r["sale_date"], "sold_to": parties.get(r["sale_party"], r["sale_party"]) or None,
+         "sale_bill": r["sale_vno"] or None, "sale_rate": money(r["sale_rate"] or 0) if r["sold"] else None} for r in rows]}
+
+
+def t_stock(a):
+    comp, err = resolve_company(a.get("company"))
+    if err: return err
+    rows = sb_rpc("miracle_stock_summary", {"p_company": comp["company_no"], "p_search": clean_q(a.get("search", ""))})
+    lim = int(a.get("limit", 100))
+    return {"company": comp["name"], "total_phones_in_stock": sum(int(r["in_stock"]) for r in rows), "models": len(rows),
+            "items": [{"item": r["item_name"] or r["item_code"], "in_stock": r["in_stock"], "avg_cost": money(r["avg_cost"] or 0)} for r in rows[:lim]],
+            "note": "stock = IMEIs bought but not yet sold, as per Miracle serial-number records"}
+
+
+def t_item_lines(a):
+    comp, err = resolve_company(a.get("company"))
+    if err: return err
+    cno = comp["company_no"]
+    p = {"select": "voucher_id,vdate,vtype,item_code,dc,qty,rate,amount,party_code", "company_no": "eq." + cno,
+         "order": "vdate.desc,id.desc"}
+    conds = []
+    if a.get("from_date"): conds.append("vdate.gte." + a["from_date"])
+    if a.get("to_date"): conds.append("vdate.lte." + a["to_date"])
+    if conds: p["and"] = "(" + ",".join(conds) + ")"
+    if a.get("vtype"): p["vtype"] = "eq." + a["vtype"].upper()
+    if a.get("item"):
+        codes = _item_codes(cno, a["item"])
+        if not codes: return {"message": "no item matches", "company": comp["name"]}
+        p["item_code"] = "in.(" + ",".join(codes) + ")"
+    if a.get("party"):
+        codes = _party_codes(cno, a["party"])
+        if not codes: return {"message": "no party matches", "company": comp["name"]}
+        p["party_code"] = "in.(" + ",".join(codes) + ")"
+    rows = sb_get("miracle_item_lines", p, limit=int(a.get("limit", 200)))
+    items = _names("miracle_item_latest", cno, [r["item_code"] for r in rows])
+    parties = _names("miracle_ledger_latest", cno, [r["party_code"] for r in rows])
+    return {"company": comp["name"], "count": len(rows), "total_qty": money(sum(float(r["qty"] or 0) for r in rows)),
+            "total_amount": money(sum(float(r["amount"] or 0) for r in rows)), "lines": [
+        {"date": r["vdate"], "type": r["vtype"], "item": items.get(r["item_code"], r["item_code"]), "qty": float(r["qty"] or 0),
+         "rate": money(r["rate"] or 0), "amount": money(r["amount"] or 0), "party": parties.get(r["party_code"], r["party_code"])} for r in rows],
+            "note": "vtype SS = sales, PP = purchase. Amounts as per Miracle item lines (before extra charges/discounts on the bill)"}
+
+
 COMP = {"type": "string", "description": "Company name part (e.g. 'surat') or number (e.g. 0003)"}
 TOOLS = {
     "miracle_companies": ("List Miracle companies and when data was last synced", {"type": "object", "properties": {}}, t_companies),
@@ -306,6 +400,18 @@ TOOLS = {
     "miracle_vouchers": ("Voucher entries (day book) with filters on date, voucher type (CR,CP,BR,BP,BC,JR,SS,PP) and narration text",
                          {"type": "object", "properties": {"company": COMP, "from_date": {"type": "string"}, "to_date": {"type": "string"},
                           "vtype": {"type": "string"}, "search": {"type": "string"}, "limit": {"type": "integer", "default": 100}}, "required": ["company"]}, t_vouchers),
+    "miracle_imei": ("Phone/IMEI records: look up an IMEI (full or partial), or list phones by item, status (sold/instock), sold_to or bought_from party and sale date range. Shows purchase and sale details.",
+                     {"type": "object", "properties": {"company": COMP, "imei": {"type": "string"}, "item": {"type": "string", "description": "model name part"},
+                      "status": {"type": "string", "enum": ["sold", "instock"]}, "sold_to": {"type": "string", "description": "customer/party name"},
+                      "bought_from": {"type": "string", "description": "supplier name"}, "from_date": {"type": "string", "description": "sale date from, YYYY-MM-DD"},
+                      "to_date": {"type": "string"}, "limit": {"type": "integer", "default": 50}}, "required": ["company"]}, t_imei),
+    "miracle_stock": ("Phones currently in stock (bought, not sold) model-wise with counts and average cost",
+                      {"type": "object", "properties": {"company": COMP, "search": {"type": "string", "description": "model name part"},
+                       "limit": {"type": "integer", "default": 100}}, "required": ["company"]}, t_stock),
+    "miracle_item_lines": ("Item-wise sales/purchase lines (qty, rate, amount) with filters on item, party, voucher type SS/PP and dates",
+                           {"type": "object", "properties": {"company": COMP, "item": {"type": "string"}, "party": {"type": "string"},
+                            "vtype": {"type": "string", "description": "SS sales or PP purchase"}, "from_date": {"type": "string"},
+                            "to_date": {"type": "string"}, "limit": {"type": "integer", "default": 200}}, "required": ["company"]}, t_item_lines),
 }
 
 
@@ -313,7 +419,7 @@ def rpc(body):
     m, rid = body.get("method", ""), body.get("id")
     ok = lambda r: jsonify({"jsonrpc": "2.0", "id": rid, "result": r})
     if m == "initialize":
-        return ok({"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "Miracle Connector", "version": "2.0"}})
+        return ok({"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "Miracle Connector", "version": "2.2"}})
     if m.startswith("notifications/"):
         return ("", 202)
     if m == "tools/list":
@@ -336,13 +442,13 @@ def mcp_endpoint():
         b = base_url()
         return Response("unauthorized", 401, {"WWW-Authenticate": f'Bearer resource_metadata="{b}/.well-known/oauth-protected-resource"'})
     if request.method != "POST":
-        return jsonify({"name": "Miracle Connector", "version": "2.0"})
+        return jsonify({"name": "Miracle Connector", "version": "2.2"})
     return rpc(request.get_json(force=True, silent=True) or {})
 
 
 @app.route("/")
 def home():
-    return jsonify({"status": "Miracle Connector running", "version": "2.0"})
+    return jsonify({"status": "Miracle Connector running", "version": "2.2"})
 
 
 if __name__ == "__main__":
